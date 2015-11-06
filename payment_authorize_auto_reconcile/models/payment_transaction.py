@@ -22,32 +22,10 @@ from openerp import models, api
 from openerp.exceptions import ValidationError
 import logging
 
-
 _logger = logging.getLogger(__name__)
-
 
 class PaymentTransaction(models.Model):
     _inherit = 'payment.transaction'
-
-    @api.model
-    def _send_thankyou_message(self, pay_amount, invoice):
-        ''' Send a thankyou message to partners subscribed to the invoice  '''
-        last_message = invoice.message_ids[-1]
-        thread = self.env['mail.thread'].browse(last_message.res_id)
-
-        thread.sudo().message_post(
-            subject='Payment Received',
-            body='''
-            Hi %s,
-                <br /><br />
-                Your payment of %s has been received for invoice %s.
-                <br /><br />
-                We appreciate your business!''' % (
-                    invoice.partner_id.name, pay_amount,
-                    invoice.number
-            ),
-            partner_ids=[invoice.partner_id.id]
-        )
 
     @api.model
     def _authorize_form_get_tx_from_data(self, data):
@@ -68,52 +46,53 @@ class PaymentTransaction(models.Model):
             _logger.error(error_msg)
             raise ValidationError(error_msg)
 
+        # Create a transaction on the spot if it is missing
         tx = self.search([('reference', '=', reference)])
-
         if not tx:
-
-            invoice = self.env['account.invoice'].search([
-                ('internal_number', '=', reference)
+            order = self.env['sale.order'].search([
+                ('name', '=', reference)
             ], limit=1)
             acquirer = self.env['payment.acquirer'].search([
                 ('provider', '=', 'authorize'),
-                ('company_id', '=', invoice.company_id.id)
+                ('company_id', '=', order.company_id.id)
             ], limit=1)
+	    amount = data.get('x_amount')
 
-            pay_amount = data.get('x_amount')
-
-            tx = [self.create({
-                'reference': reference,
+            tx = self.create({
                 'acquirer_id': acquirer.id,
-                'amount': pay_amount,
+                'type': 'form',
+                'amount': amount,
+                'currency_id': order.pricelist_id.currency_id.id,
+                'partner_id': order.partner_id.id,
+                'partner_country_id': order.partner_id.country_id.id,
+                'reference': order.name,
+                'sale_order_id': order.id,
                 'state': 'draft',
-                'currency_id': invoice.currency_id.id,
-                'partner_id': invoice.partner_id.id,
-                'partner_country_id': invoice.partner_id.country_id.id,
-                'partner_state': data.get('x_state'),
-                'partner_city': data.get('x_city'),
-                'partner_street': data.get('x_address'),
-            })]
+            })
 
-            trans_id = data.get('x_trans_id', 0)
-            invoice.pay_and_reconcile(
-                pay_amount=pay_amount,
-                pay_account_id=invoice.account_id.id,
-                period_id=invoice.period_id.id,
-                pay_journal_id=invoice.journal_id.id,
-                writeoff_acc_id=invoice.account_id.id,
-                writeoff_period_id=invoice.period_id.id,
-                writeoff_journal_id=invoice.journal_id.id,
-                name='Authorize.net Transaction ID %s' % trans_id,
-            )
+	    # Update order
+	    order.payment_acquirer_id = acquirer
+	    order.payment_tx_id = tx
 
-            # self._send_thankyou_message(pay_amount, invoice)
+	    # Create payment for transaction
+	    payment_method = self.env['payment.method'].search([('name', '=', 'Back Office')], limit=1)
+	    if payment_method:
+	    	order.payment_method_id = payment_method
+	    	order.automatic_payment(amount)
 
-        elif len(tx) > 1:
+	    	# Set workflow
+	    	order.onchange_payment_method_set_workflow()
+	    	order.onchange_workflow_process_id()
+
+        if not tx or len(tx) > 1:
             error_msg = 'Authorize: received data for reference %s' % (
                 reference
             )
-            error_msg += '; multiple orders found'
+            if not tx:
+                error_msg += '; no order found'
+            else:
+                error_msg += '; multiple order found'
+                
             _logger.error(error_msg)
             raise ValidationError(error_msg)
 

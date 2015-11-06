@@ -28,5 +28,7 @@
     'depends': [
         'payment',
         'payment_authorize',
+	'sale_payment_method',
+	'sale_automatic_workflow',
     ],
 }
